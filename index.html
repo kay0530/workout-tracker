@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="筋トレ記録" />
+  <meta name="theme-color" content="#0d0d14" />
+  <title>筋トレ記録</title>
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <link rel="manifest" href="manifest.json" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body { background: #0d0d14; overflow-x: hidden; }
+    /* safe area padding for iPhone notch */
+    #root { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  </style>
+  <!-- React 18 via CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Recharts via CDN -->
+  <script crossorigin src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+  <!-- Babel standalone for JSX -->
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useMemo } = React;
+    const { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, LineChart, Line } = Recharts;
+
+    // ---- localStorage wrapper (replaces window.storage) ----
+    const storage = {
+      get(key) {
+        try {
+          const value = localStorage.getItem(key);
+          return value !== null ? { value } : null;
+        } catch(e) { return null; }
+      },
+      set(key, value) {
+        try { localStorage.setItem(key, value); return true; } catch(e) { return false; }
+      },
+      delete(key) {
+        try { localStorage.removeItem(key); return true; } catch(e) { return false; }
+      }
+    };
+
+    // アブローラーは膝コロ・立ちコロを独立記録
+    const EXERCISES = [
+      { id: "ab_hiza",  name: "膝コロ",     icon: "🔄", type: "reps", unit: "回", color: "#ff6b35", group: "abroller" },
+      { id: "ab_tachi", name: "立ちコロ",    icon: "🔄", type: "reps", unit: "回", color: "#ff9f6b", group: "abroller" },
+      { id: "plank",    name: "プランク",    icon: "🧘", type: "time", unit: "秒", color: "#00e676" },
+      { id: "pullup",   name: "懸垂",       icon: "💪", type: "reps", unit: "回", color: "#448aff" },
+      { id: "squat",    name: "スクワット",  icon: "🦵", type: "time", unit: "秒", color: "#e040fb" },
+    ];
+
+    const EXERCISE_GROUPS = [
+      { groupId: "abroller", label: "アブローラー", icon: "🔄", color: "#ff6b35", members: ["ab_hiza", "ab_tachi"] },
+      { groupId: "plank",    label: "プランク",     icon: "🧘", color: "#00e676", members: ["plank"] },
+      { groupId: "pullup",   label: "懸垂",        icon: "💪", color: "#448aff", members: ["pullup"] },
+      { groupId: "squat",    label: "スクワット",   icon: "🦵", color: "#e040fb", members: ["squat"] },
+    ];
+
+    const countCompletedGroups = (dayRec) => {
+      if (!dayRec) return 0;
+      return EXERCISE_GROUPS.filter(g => g.members.some(id => dayRec[id] != null)).length;
+    };
+
+    const TOTAL_GROUPS = EXERCISE_GROUPS.length;
+    const STORAGE_KEY = "workout-log-v3";
+    const formatDate = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const DAYS_JP = ["日","月","火","水","木","金","土"];
+    const formatDateJP = (d) => `${d.getMonth()+1}/${d.getDate()}(${DAYS_JP[d.getDay()]})`;
+    const formatTime = (sec) => { if(!sec) return "—"; const m=Math.floor(sec/60),s=sec%60; return m>0?`${m}分${s>0?s+"秒":""}`:`${s}秒`; };
+    const parseLocalDate = (str) => { const [y,m,d]=str.split("-").map(Number); return new Date(y,m-1,d); };
+
+    // ---------- Chart helpers ----------
+    const getPeriodDates = (period) => {
+      const today = new Date();
+      const dates = [];
+      if (period === "week") { for (let i=6;i>=0;i--) { const d=new Date(today); d.setDate(d.getDate()-i); dates.push(d); } }
+      else if (period === "month") { for (let i=29;i>=0;i--) { const d=new Date(today); d.setDate(d.getDate()-i); dates.push(d); } }
+      else { for (let i=11;i>=0;i--) { const d=new Date(today); d.setMonth(d.getMonth()-i); dates.push(d); } }
+      return dates;
+    };
+
+    const getChartData = (records, exerciseId, period) => {
+      const dates = getPeriodDates(period);
+      if (period === "year") {
+        return dates.map(d => {
+          const y=d.getFullYear(), m=d.getMonth(); let sum=0, count=0;
+          Object.keys(records).forEach(key => {
+            const rd=parseLocalDate(key);
+            if (rd.getFullYear()===y && rd.getMonth()===m && records[key][exerciseId]!=null) { sum+=records[key][exerciseId]; count++; }
+          });
+          return { label:`${m+1}月`, value:count>0?Math.round(sum/count):0, count };
+        });
+      }
+      return dates.map(d => {
+        const key=formatDate(d), val=records[key]?.[exerciseId];
+        return { label: period==="week"?DAYS_JP[d.getDay()]:`${d.getMonth()+1}/${d.getDate()}`, value:val??0, hasData:val!=null };
+      });
+    };
+
+    const ChartTooltip = ({ active, payload, exercise }) => {
+      if (!active || !payload?.[0]) return null;
+      const d=payload[0].payload, val=d.value;
+      return (
+        <div style={{background:"#1e1e2e",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"8px 12px",fontSize:13}}>
+          <div style={{color:"#aaa",marginBottom:2}}>{d.label}</div>
+          <div style={{color:"#fff",fontWeight:700}}>
+            {val>0?(exercise.type==="time"?formatTime(val):`${val}${exercise.unit}`):"記録なし"}
+          </div>
+        </div>
+      );
+    };
+
+    function App() {
+      const [records, setRecords] = useState({});
+      const [selectedDate, setSelectedDate] = useState(new Date());
+      const [view, setView] = useState("today");
+      const [timerActive, setTimerActive] = useState(false);
+      const [timerSeconds, setTimerSeconds] = useState(0);
+      const [timerExId, setTimerExId] = useState(null);
+      const [editingExercise, setEditingExercise] = useState(null);
+      const [inputValue, setInputValue] = useState("");
+      const [loaded, setLoaded] = useState(false);
+      const [chartExercise, setChartExercise] = useState("ab_hiza");
+      const [chartPeriod, setChartPeriod] = useState("week");
+      const [showBackup, setShowBackup] = useState(false);
+      const [importText, setImportText] = useState("");
+      const [storageOk, setStorageOk] = useState(false);
+      const [toast, setToast] = useState("");
+      const showToast = (msg) => { setToast(msg); setTimeout(()=>setToast(""), 2500); };
+
+      const trySave = useCallback((data) => {
+        return storage.set(STORAGE_KEY, JSON.stringify(data));
+      }, []);
+
+      const tryLoad = useCallback(() => {
+        const r = storage.get(STORAGE_KEY);
+        if (r?.value) return JSON.parse(r.value);
+        // Try old keys
+        for (const oldKey of ["workout-log-v2", "workout-log-v1"]) {
+          const old = storage.get(oldKey);
+          if (old?.value) {
+            const parsed = JSON.parse(old.value);
+            const migrated = {};
+            Object.entries(parsed).forEach(([dateKey, dayRec]) => {
+              const newDay = { ...dayRec };
+              if (newDay.abroller != null && newDay.ab_hiza == null) {
+                newDay.ab_hiza = newDay.abroller; delete newDay.abroller;
+              }
+              migrated[dateKey] = newDay;
+            });
+            return migrated;
+          }
+        }
+        return {};
+      }, []);
+
+      // ---------- Load on mount ----------
+      useEffect(() => {
+        const data = tryLoad();
+        setRecords(data);
+        // Test if storage works
+        try {
+          storage.set("_ping", "1");
+          const check = storage.get("_ping");
+          setStorageOk(!!check?.value);
+          storage.delete("_ping");
+        } catch(e) { setStorageOk(false); }
+        setLoaded(true);
+      }, [tryLoad]);
+
+      // ---------- Timer ----------
+      useEffect(() => {
+        if (!timerActive) return;
+        const id=setInterval(()=>setTimerSeconds(s=>s+1),1000);
+        return ()=>clearInterval(id);
+      }, [timerActive]);
+
+      const todayKey = formatDate(selectedDate);
+      const todayRecords = records[todayKey] || {};
+      const isToday = formatDate(selectedDate) === formatDate(new Date());
+      const completedGroups = countCompletedGroups(todayRecords);
+
+      const saveRecord = useCallback((exId, val) => {
+        setRecords(prev => {
+          const next = {...prev, [todayKey]: {...(prev[todayKey]||{}), [exId]: val}};
+          trySave(next);
+          return next;
+        });
+      }, [todayKey, trySave]);
+
+      const deleteRecord = useCallback((exId) => {
+        setRecords(prev => {
+          const day={...(prev[todayKey]||{})}; delete day[exId];
+          let next;
+          if(!Object.keys(day).length) { next={...prev}; delete next[todayKey]; }
+          else { next={...prev,[todayKey]:day}; }
+          trySave(next);
+          return next;
+        });
+      }, [todayKey, trySave]);
+
+      const handleExport = async () => {
+        const json = JSON.stringify(records, null, 2);
+        try {
+          await navigator.clipboard.writeText(json);
+          showToast("✅ クリップボードにコピーしました");
+        } catch(e) {
+          showToast("テキストを選択してコピーしてください");
+        }
+      };
+
+      const handleImport = () => {
+        try {
+          const data = JSON.parse(importText.trim());
+          if (typeof data !== "object" || Array.isArray(data)) throw new Error("invalid");
+          setRecords(prev => {
+            const merged = { ...prev, ...data };
+            trySave(merged);
+            return merged;
+          });
+          setImportText("");
+          setShowBackup(false);
+          showToast("✅ データを復元しました");
+        } catch(e) {
+          showToast("❌ JSONの形式が正しくありません");
+        }
+      };
+
+      const handleTimerToggle = (exId) => {
+        if (timerActive && timerExId === exId) {
+          setTimerActive(false); saveRecord(exId, timerSeconds); setTimerSeconds(0); setTimerExId(null); setEditingExercise(null);
+        } else { setTimerActive(true); setTimerSeconds(0); setTimerExId(exId); }
+      };
+
+      const handleInputSubmit = (exId) => {
+        const val=parseInt(inputValue,10);
+        if(!isNaN(val)&&val>0) saveRecord(exId, val);
+        setEditingExercise(null); setInputValue("");
+      };
+
+      const historyDates = useMemo(() => Object.keys(records).sort((a,b)=>b.localeCompare(a)).slice(0,90), [records]);
+
+      const streak = useMemo(() => {
+        let s=0; const d=new Date();
+        while(true) { const k=formatDate(d); if(countCompletedGroups(records[k])===TOTAL_GROUPS){s++;d.setDate(d.getDate()-1);}else break; }
+        return s;
+      }, [records]);
+
+      const weekData = useMemo(() => {
+        const data=[];
+        for(let i=6;i>=0;i--){const d=new Date();d.setDate(d.getDate()-i);const k=formatDate(d);data.push({date:d,completed:countCompletedGroups(records[k])});}
+        return data;
+      }, [records]);
+
+      const chartData = useMemo(() => getChartData(records, chartExercise, chartPeriod), [records, chartExercise, chartPeriod]);
+      const activeEx = EXERCISES.find(e => e.id === chartExercise);
+
+      // ---------- Render input for a single exercise ----------
+      const renderExInput = (ex) => {
+        const isTimerRunning = timerActive && timerExId === ex.id;
+        const isEditing = editingExercise === ex.id;
+        const value = todayRecords[ex.id];
+        const done = value != null;
+
+        if (done && !isEditing) {
+          return (
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:12,color:"#aaa",minWidth:52}}>{ex.name}</span>
+                <span style={{fontSize:18,fontWeight:800,color:ex.color}}>
+                  {ex.type==="time"?formatTime(value):`${value}${ex.unit}`}
+                </span>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <button style={S.editBtnSm} onClick={()=>{setEditingExercise(ex.id);setInputValue(String(value));}}>編集</button>
+                <button style={S.deleteBtnSm} onClick={()=>deleteRecord(ex.id)}>削除</button>
+              </div>
+            </div>
+          );
+        }
+
+        if (isEditing) {
+          return (
+            <div style={{padding:"8px 0",display:"flex",flexDirection:"column",gap:8}}>
+              <div style={{fontSize:12,color:"#aaa",fontWeight:600}}>{ex.name}</div>
+              {ex.type==="time" && !isTimerRunning ? (
+                <>
+                  <button style={{...S.actionBtn,background:`linear-gradient(135deg,${ex.color},${ex.color}cc)`,padding:"10px"}} onClick={()=>handleTimerToggle(ex.id)}>⏱ タイマー開始</button>
+                  <div style={{textAlign:"center",color:"#555",fontSize:11}}>または</div>
+                  <div style={{display:"flex",gap:8}}>
+                    <input style={S.input} type="number" placeholder="秒数を入力" value={inputValue}
+                      onChange={e=>setInputValue(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleInputSubmit(ex.id)} autoFocus/>
+                    <button style={S.submitBtn} onClick={()=>handleInputSubmit(ex.id)}>記録</button>
+                  </div>
+                </>
+              ) : isTimerRunning ? (
+                <div style={{textAlign:"center"}}>
+                  <div style={{fontSize:44,fontWeight:800,fontVariantNumeric:"tabular-nums",color:ex.color,marginBottom:10,letterSpacing:2}}>
+                    {Math.floor(timerSeconds/60).toString().padStart(2,"0")}:{(timerSeconds%60).toString().padStart(2,"0")}
+                  </div>
+                  <button style={{...S.actionBtn,background:"linear-gradient(135deg,#e63946,#ff6b6b)"}} onClick={()=>handleTimerToggle(ex.id)}>⏹ ストップ＆記録</button>
+                </div>
+              ) : (
+                <div style={{display:"flex",gap:8}}>
+                  <input style={S.input} type="number" placeholder={`${ex.unit}数を入力`} value={inputValue}
+                    onChange={e=>setInputValue(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleInputSubmit(ex.id)} autoFocus/>
+                  <button style={S.submitBtn} onClick={()=>handleInputSubmit(ex.id)}>記録</button>
+                </div>
+              )}
+              <button style={{background:"none",border:"none",color:"#666",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}
+                onClick={()=>{setEditingExercise(null);setInputValue("");if(isTimerRunning){setTimerActive(false);setTimerExId(null);}}}>
+                キャンセル
+              </button>
+            </div>
+          );
+        }
+        return null;
+      };
+
+      if (!loaded) return (
+        <div style={S.loadScreen}><div style={{fontSize:48,marginBottom:16}}>🏋️</div><div style={{color:"#888"}}>読み込み中...</div></div>
+      );
+
+      return (
+        <div style={S.container}>
+          {/* Header */}
+          <div style={S.header}>
+            <div style={S.headerTop}>
+              <h1 style={S.title}>筋トレ記録</h1>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                {streak > 0 && <div style={S.streakBadge}>🔥 {streak}日連続</div>}
+                <button onClick={()=>setShowBackup(!showBackup)}
+                  style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,width:36,height:36,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",color:"#aaa"}}>
+                  💾
+                </button>
+              </div>
+            </div>
+            {!storageOk && loaded && (
+              <div style={{background:"rgba(255,160,0,0.1)",border:"1px solid rgba(255,160,0,0.3)",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:11,color:"#ffa000",lineHeight:1.5}}>
+                ⚠️ 自動保存が利用できません。💾ボタンからデータをバックアップしてください。
+              </div>
+            )}
+            <div style={S.tabs}>
+              {[["today","今日の記録"],["chart","グラフ"],["history","履歴"]].map(([k,l])=>(
+                <button key={k} style={{...S.tab,...(view===k?S.tabActive:{})}}
+                  onClick={()=>{setView(k);if(k==="today")setSelectedDate(new Date());setShowBackup(false);}}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Toast */}
+          {toast && (
+            <div style={{position:"fixed",top:80,left:"50%",transform:"translateX(-50%)",background:"#2a2a3e",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:"10px 20px",fontSize:13,fontWeight:600,color:"#fff",zIndex:999,boxShadow:"0 4px 20px rgba(0,0,0,0.5)"}}>
+              {toast}
+            </div>
+          )}
+
+          {/* Backup/Restore Panel */}
+          {showBackup && (
+            <div style={{padding:"16px 20px"}}>
+              <div style={{...S.card,padding:16}}>
+                <div style={{fontSize:15,fontWeight:700,marginBottom:12}}>💾 データ管理</div>
+                <div style={{fontSize:12,color:"#888",marginBottom:16,lineHeight:1.5}}>
+                  {storageOk
+                    ? "✅ 自動保存は有効です。バックアップとしてエクスポートもできます。"
+                    : "⚠️ 自動保存が動作していません。アプリを閉じる前にエクスポートしてください。"}
+                </div>
+                <button onClick={handleExport}
+                  style={{...S.actionBtn,background:"linear-gradient(135deg,#448aff,#448affaa)",marginBottom:16}}>
+                  📋 データをコピー（エクスポート）
+                </button>
+                <div style={{fontSize:11,color:"#666",marginBottom:16,textAlign:"center"}}>
+                  記録数: {Object.keys(records).length}日分
+                </div>
+                <div style={{fontSize:13,fontWeight:600,marginBottom:8,color:"#aaa"}}>データ復元（インポート）</div>
+                <textarea
+                  style={{width:"100%",minHeight:80,background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,color:"#fff",fontSize:12,padding:10,fontFamily:"monospace",outline:"none",resize:"vertical",boxSizing:"border-box"}}
+                  placeholder='エクスポートしたJSONをここに貼り付け...'
+                  value={importText}
+                  onChange={e=>setImportText(e.target.value)}
+                />
+                {importText.trim() && (
+                  <button onClick={handleImport}
+                    style={{...S.actionBtn,background:"linear-gradient(135deg,#00e676,#00e676aa)",marginTop:8}}>
+                    📥 復元する
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div style={S.content}>
+            {/* ===== TODAY ===== */}
+            {view === "today" && (
+              <>
+                <div style={S.dateNav}>
+                  <button style={S.dateBtn} onClick={()=>{const d=new Date(selectedDate);d.setDate(d.getDate()-1);setSelectedDate(d);}}>◀</button>
+                  <div style={S.dateDisplay}>
+                    <span style={S.dateText}>{formatDateJP(selectedDate)}</span>
+                    {isToday && <span style={S.todayLabel}>TODAY</span>}
+                  </div>
+                  <button style={S.dateBtn} onClick={()=>{const d=new Date(selectedDate);d.setDate(d.getDate()+1);if(d<=new Date())setSelectedDate(d);}}>▶</button>
+                </div>
+
+                {/* Progress Ring */}
+                <div style={{display:"flex",justifyContent:"center",marginBottom:24}}>
+                  <div style={{position:"relative",width:100,height:100}}>
+                    <svg width="100" height="100" viewBox="0 0 100 100">
+                      <circle cx="50" cy="50" r="42" fill="none" stroke="#2a2a3a" strokeWidth="8"/>
+                      <circle cx="50" cy="50" r="42" fill="none"
+                        stroke={completedGroups===TOTAL_GROUPS?"#00e676":"#ff6b35"}
+                        strokeWidth="8" strokeLinecap="round"
+                        strokeDasharray={`${(completedGroups/TOTAL_GROUPS)*264} 264`}
+                        transform="rotate(-90 50 50)" style={{transition:"stroke-dasharray 0.6s ease"}}/>
+                    </svg>
+                    <div style={{position:"absolute",top:"50%",left:"50%",transform:"translate(-50%,-50%)",textAlign:"center"}}>
+                      <span style={{fontSize:28,fontWeight:800}}>{completedGroups}</span>
+                      <span style={{fontSize:16,color:"#666"}}>/{TOTAL_GROUPS}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Exercise Cards by group */}
+                <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                  {EXERCISE_GROUPS.map(group => {
+                    const members = group.members.map(id => EXERCISES.find(e=>e.id===id));
+                    const isMulti = members.length > 1;
+                    const groupDone = members.some(m => todayRecords[m.id] != null);
+                    const anyEditing = members.some(m => editingExercise === m.id);
+                    return (
+                      <div key={group.groupId} style={{...S.card,...(groupDone?{background:"rgba(0,230,118,0.04)",borderColor:"rgba(0,230,118,0.2)"}:{})}}>
+                        <div style={S.cardHeader}>
+                          <div style={{display:"flex",alignItems:"center",gap:12}}>
+                            <span style={{fontSize:28}}>{group.icon}</span>
+                            <div>
+                              <div style={{fontSize:16,fontWeight:700}}>{group.label}</div>
+                              <div style={{fontSize:11,color:group.color,marginTop:1}}>
+                                {members[0].type==="time"?"⏱ 時間記録":"🔢 回数記録"}
+                                {isMulti && <span style={{color:"#666",marginLeft:6}}>膝コロ / 立ちコロ</span>}
+                              </div>
+                            </div>
+                          </div>
+                          {groupDone && <div style={S.checkMark}>✓</div>}
+                        </div>
+
+                        {isMulti ? (
+                          <div>
+                            {members.map(m => <div key={m.id}>{renderExInput(m)}</div>)}
+                            {!groupDone && !anyEditing && (
+                              <div style={{display:"flex",gap:8}}>
+                                {members.map(m => (
+                                  <button key={m.id} style={{...S.actionBtn,flex:1,padding:"10px",fontSize:14,background:`linear-gradient(135deg,${m.color},${m.color}aa)`}}
+                                    onClick={()=>setEditingExercise(m.id)}>
+                                    {m.name}を記録
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            {!anyEditing && groupDone && members.some(m=>todayRecords[m.id]==null) && (
+                              <div style={{display:"flex",gap:8,marginTop:6}}>
+                                {members.filter(m=>todayRecords[m.id]==null).map(m=>(
+                                  <button key={m.id} style={{...S.addMoreBtn,borderColor:m.color+"44",color:m.color}}
+                                    onClick={()=>setEditingExercise(m.id)}>
+                                    + {m.name}も記録
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          (() => {
+                            const ex = members[0];
+                            const value = todayRecords[ex.id];
+                            const done = value != null;
+                            const isTimerRunning = timerActive && timerExId === ex.id;
+                            const isEditing = editingExercise === ex.id;
+                            if (done && !isEditing) {
+                              return (
+                                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                                  <div style={{fontSize:22,fontWeight:800,color:ex.color}}>
+                                    {ex.type==="time"?formatTime(value):`${value}${ex.unit}`}
+                                  </div>
+                                  <div style={{display:"flex",gap:8}}>
+                                    <button style={S.editBtn} onClick={()=>{setEditingExercise(ex.id);setInputValue(String(value));}}>編集</button>
+                                    <button style={S.deleteBtn} onClick={()=>deleteRecord(ex.id)}>削除</button>
+                                  </div>
+                                </div>
+                              );
+                            }
+                            if (isEditing) {
+                              return (
+                                <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                                  {ex.type==="time" && !isTimerRunning ? (
+                                    <>
+                                      <button style={{...S.actionBtn,background:`linear-gradient(135deg,${ex.color},${ex.color}cc)`}} onClick={()=>handleTimerToggle(ex.id)}>⏱ タイマー開始</button>
+                                      <div style={{textAlign:"center",color:"#555",fontSize:12}}>または</div>
+                                      <div style={{display:"flex",gap:8}}>
+                                        <input style={S.input} type="number" placeholder="秒数を入力" value={inputValue}
+                                          onChange={e=>setInputValue(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleInputSubmit(ex.id)} autoFocus/>
+                                        <button style={S.submitBtn} onClick={()=>handleInputSubmit(ex.id)}>記録</button>
+                                      </div>
+                                    </>
+                                  ) : isTimerRunning ? (
+                                    <div style={{textAlign:"center"}}>
+                                      <div style={{fontSize:48,fontWeight:800,fontVariantNumeric:"tabular-nums",color:ex.color,marginBottom:12,letterSpacing:2}}>
+                                        {Math.floor(timerSeconds/60).toString().padStart(2,"0")}:{(timerSeconds%60).toString().padStart(2,"0")}
+                                      </div>
+                                      <button style={{...S.actionBtn,background:"linear-gradient(135deg,#e63946,#ff6b6b)"}} onClick={()=>handleTimerToggle(ex.id)}>⏹ ストップ＆記録</button>
+                                    </div>
+                                  ) : (
+                                    <div style={{display:"flex",gap:8}}>
+                                      <input style={S.input} type="number" placeholder={`${ex.unit}数を入力`} value={inputValue}
+                                        onChange={e=>setInputValue(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleInputSubmit(ex.id)} autoFocus/>
+                                      <button style={S.submitBtn} onClick={()=>handleInputSubmit(ex.id)}>記録</button>
+                                    </div>
+                                  )}
+                                  <button style={{background:"none",border:"none",color:"#666",fontSize:13,cursor:"pointer",fontFamily:"inherit"}}
+                                    onClick={()=>{setEditingExercise(null);setInputValue("");if(isTimerRunning){setTimerActive(false);setTimerExId(null);}}}>キャンセル</button>
+                                </div>
+                              );
+                            }
+                            return (
+                              <button style={{...S.actionBtn,background:`linear-gradient(135deg,${ex.color},${ex.color}aa)`}} onClick={()=>setEditingExercise(ex.id)}>
+                                記録する
+                              </button>
+                            );
+                          })()
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Week dots */}
+                <div style={{marginTop:28,...S.card,padding:16}}>
+                  <h3 style={{fontSize:14,fontWeight:700,color:"#888",margin:"0 0 14px",textAlign:"center"}}>今週の達成状況</h3>
+                  <div style={{display:"flex",justifyContent:"space-around"}}>
+                    {weekData.map((d,i)=>(
+                      <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+                        <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                          {EXERCISE_GROUPS.map((g,j)=>(
+                            <div key={j} style={{width:10,height:10,borderRadius:"50%",backgroundColor:j<d.completed?g.color:"#2a2a3a",transition:"background 0.3s"}}/>
+                          ))}
+                        </div>
+                        <div style={{fontSize:11,fontWeight:600,color:formatDate(d.date)===formatDate(new Date())?"#ff6b35":"#888"}}>
+                          {DAYS_JP[d.date.getDay()]}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* ===== CHART ===== */}
+            {view === "chart" && (
+              <>
+                <div style={{display:"flex",gap:6,marginBottom:16,flexWrap:"wrap"}}>
+                  {EXERCISES.map(ex => (
+                    <button key={ex.id} onClick={()=>setChartExercise(ex.id)}
+                      style={{...S.chipBtn, background:chartExercise===ex.id?ex.color+"22":"rgba(255,255,255,0.04)",
+                        borderColor:chartExercise===ex.id?ex.color+"66":"rgba(255,255,255,0.08)",
+                        color:chartExercise===ex.id?ex.color:"#888"}}>
+                      {ex.icon} {ex.name}
+                    </button>
+                  ))}
+                </div>
+                <div style={{display:"flex",gap:4,marginBottom:20,background:"rgba(255,255,255,0.04)",borderRadius:10,padding:3}}>
+                  {[["week","週間"],["month","月間"],["year","年間"]].map(([k,l])=>(
+                    <button key={k} onClick={()=>setChartPeriod(k)}
+                      style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600,
+                        background:chartPeriod===k?activeEx.color:"transparent",color:chartPeriod===k?"#fff":"#888",transition:"all 0.2s"}}>
+                      {l}
+                    </button>
+                  ))}
+                </div>
+                <div style={{...S.card,padding:"16px 8px 8px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",padding:"0 8px",marginBottom:12}}>
+                    <div style={{fontSize:16,fontWeight:700}}>{activeEx.icon} {activeEx.name}</div>
+                    <div style={{fontSize:12,color:"#888"}}>{activeEx.type==="time"?"秒":activeEx.unit}</div>
+                  </div>
+                  <ResponsiveContainer width="100%" height={220}>
+                    {chartPeriod === "year" ? (
+                      <BarChart data={chartData} margin={{top:4,right:8,left:-20,bottom:0}}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false}/>
+                        <XAxis dataKey="label" tick={{fill:"#888",fontSize:11}} axisLine={false} tickLine={false}/>
+                        <YAxis tick={{fill:"#666",fontSize:10}} axisLine={false} tickLine={false}/>
+                        <Tooltip content={<ChartTooltip exercise={activeEx}/>} cursor={{fill:"rgba(255,255,255,0.04)"}}/>
+                        <Bar dataKey="value" fill={activeEx.color} radius={[4,4,0,0]} maxBarSize={32}/>
+                      </BarChart>
+                    ) : chartPeriod === "month" ? (
+                      <LineChart data={chartData} margin={{top:4,right:8,left:-20,bottom:0}}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false}/>
+                        <XAxis dataKey="label" tick={{fill:"#888",fontSize:10}} axisLine={false} tickLine={false} interval={4}/>
+                        <YAxis tick={{fill:"#666",fontSize:10}} axisLine={false} tickLine={false}/>
+                        <Tooltip content={<ChartTooltip exercise={activeEx}/>}/>
+                        <Line type="monotone" dataKey="value" stroke={activeEx.color} strokeWidth={2.5} dot={{r:3,fill:activeEx.color}} activeDot={{r:5}}/>
+                      </LineChart>
+                    ) : (
+                      <BarChart data={chartData} margin={{top:4,right:8,left:-20,bottom:0}}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false}/>
+                        <XAxis dataKey="label" tick={{fill:"#888",fontSize:12}} axisLine={false} tickLine={false}/>
+                        <YAxis tick={{fill:"#666",fontSize:10}} axisLine={false} tickLine={false}/>
+                        <Tooltip content={<ChartTooltip exercise={activeEx}/>} cursor={{fill:"rgba(255,255,255,0.04)"}}/>
+                        <Bar dataKey="value" fill={activeEx.color} radius={[6,6,0,0]} maxBarSize={40}/>
+                      </BarChart>
+                    )}
+                  </ResponsiveContainer>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:12}}>
+                  {[
+                    { label:"記録日数", value: Object.values(records).filter(r=>r[chartExercise]!=null).length+"日" },
+                    { label:"最高記録", value:(()=>{
+                      const vals=Object.values(records).map(r=>r[chartExercise]).filter(v=>v!=null);
+                      if(!vals.length)return"—"; const mx=Math.max(...vals);
+                      return activeEx.type==="time"?formatTime(mx):`${mx}${activeEx.unit}`;
+                    })()},
+                    { label:"平均", value:(()=>{
+                      const vals=Object.values(records).map(r=>r[chartExercise]).filter(v=>v!=null);
+                      if(!vals.length)return"—"; const avg=Math.round(vals.reduce((a,b)=>a+b,0)/vals.length);
+                      return activeEx.type==="time"?formatTime(avg):`${avg}${activeEx.unit}`;
+                    })()},
+                  ].map((s,i)=>(
+                    <div key={i} style={{...S.card,padding:12,textAlign:"center"}}>
+                      <div style={{fontSize:11,color:"#888",marginBottom:4}}>{s.label}</div>
+                      <div style={{fontSize:16,fontWeight:800,color:activeEx.color}}>{s.value}</div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* ===== HISTORY ===== */}
+            {view === "history" && (
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {historyDates.length===0 ? (
+                  <div style={{textAlign:"center",padding:"60px 0"}}>
+                    <div style={{fontSize:48,marginBottom:12}}>📝</div>
+                    <div style={{fontSize:18,fontWeight:700,marginBottom:6}}>まだ記録がありません</div>
+                    <div style={{fontSize:14,color:"#666"}}>今日のトレーニングを記録しましょう！</div>
+                  </div>
+                ) : historyDates.map(dateKey => {
+                  const d=parseLocalDate(dateKey), rec=records[dateKey];
+                  const complete = countCompletedGroups(rec) === TOTAL_GROUPS;
+                  return (
+                    <div key={dateKey} style={{...S.card,...(complete?{borderColor:"rgba(0,230,118,0.2)"}:{}),cursor:"pointer"}}
+                      onClick={()=>{setSelectedDate(d);setView("today");}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                        <div style={{fontSize:15,fontWeight:700}}>{formatDateJP(d)}</div>
+                        {complete && <span style={{fontSize:10,fontWeight:800,color:"#00e676",background:"rgba(0,230,118,0.12)",padding:"3px 8px",borderRadius:6,letterSpacing:1}}>COMPLETE</span>}
+                      </div>
+                      <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                        {EXERCISES.map(ex => {
+                          const val=rec[ex.id];
+                          return val!=null ? (
+                            <div key={ex.id} style={{display:"flex",alignItems:"center",gap:4}}>
+                              <span style={{fontSize:13}}>{ex.icon}</span>
+                              <span style={{fontSize:12,fontWeight:600,color:ex.color}}>
+                                {ex.name}: {ex.type==="time"?formatTime(val):`${val}${ex.unit}`}
+                              </span>
+                            </div>
+                          ) : null;
+                        })}
+                        {EXERCISE_GROUPS.filter(g=>!g.members.some(id=>rec[id]!=null)).map(g=>(
+                          <div key={g.groupId} style={{display:"flex",alignItems:"center",gap:4}}>
+                            <span style={{fontSize:13}}>{g.icon}</span>
+                            <span style={{fontSize:12,fontWeight:600,color:"#444"}}>—</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    const S = {
+      container: { minHeight:"100vh", background:"linear-gradient(180deg,#0d0d14 0%,#151520 100%)", color:"#fff", fontFamily:"'Noto Sans JP','Hiragino Sans',sans-serif", maxWidth:480, margin:"0 auto" },
+      loadScreen: { minHeight:"100vh", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", background:"#0d0d14", color:"#fff" },
+      header: { padding:"20px 20px 0", background:"linear-gradient(180deg,rgba(255,107,53,0.08) 0%,transparent 100%)", borderBottom:"1px solid rgba(255,255,255,0.05)" },
+      headerTop: { display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 },
+      title: { fontSize:24, fontWeight:800, margin:0, letterSpacing:"-0.5px", background:"linear-gradient(135deg,#ff6b35,#ff9f6b)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" },
+      streakBadge: { background:"rgba(255,107,53,0.15)", border:"1px solid rgba(255,107,53,0.3)", borderRadius:20, padding:"4px 12px", fontSize:13, fontWeight:700, color:"#ff6b35" },
+      tabs: { display:"flex", gap:0 },
+      tab: { flex:1, background:"none", border:"none", color:"#666", fontSize:13, fontWeight:600, padding:"12px 0", cursor:"pointer", borderBottom:"2px solid transparent", transition:"all 0.2s", fontFamily:"inherit" },
+      tabActive: { color:"#ff6b35", borderBottomColor:"#ff6b35" },
+      content: { padding:"16px 20px 40px" },
+      dateNav: { display:"flex", alignItems:"center", justifyContent:"center", gap:16, marginBottom:20 },
+      dateBtn: { background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.1)", color:"#aaa", width:36, height:36, borderRadius:10, cursor:"pointer", fontSize:14, display:"flex", alignItems:"center", justifyContent:"center" },
+      dateDisplay: { display:"flex", alignItems:"center", gap:8 },
+      dateText: { fontSize:18, fontWeight:700, letterSpacing:"0.5px" },
+      todayLabel: { fontSize:10, fontWeight:800, color:"#ff6b35", background:"rgba(255,107,53,0.15)", padding:"2px 6px", borderRadius:4, letterSpacing:1 },
+      card: { background:"rgba(255,255,255,0.03)", border:"1px solid rgba(255,255,255,0.08)", borderRadius:16, padding:16, transition:"all 0.3s" },
+      cardHeader: { display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 },
+      checkMark: { width:28, height:28, borderRadius:"50%", background:"#00e676", color:"#0d0d14", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, fontSize:14 },
+      editBtn: { background:"rgba(255,255,255,0.08)", border:"1px solid rgba(255,255,255,0.12)", color:"#aaa", padding:"6px 14px", borderRadius:8, fontSize:12, cursor:"pointer", fontFamily:"inherit" },
+      deleteBtn: { background:"rgba(255,80,80,0.1)", border:"1px solid rgba(255,80,80,0.2)", color:"#ff5050", padding:"6px 14px", borderRadius:8, fontSize:12, cursor:"pointer", fontFamily:"inherit" },
+      editBtnSm: { background:"rgba(255,255,255,0.08)", border:"1px solid rgba(255,255,255,0.12)", color:"#aaa", padding:"4px 10px", borderRadius:6, fontSize:11, cursor:"pointer", fontFamily:"inherit" },
+      deleteBtnSm: { background:"rgba(255,80,80,0.1)", border:"1px solid rgba(255,80,80,0.2)", color:"#ff5050", padding:"4px 10px", borderRadius:6, fontSize:11, cursor:"pointer", fontFamily:"inherit" },
+      actionBtn: { width:"100%", padding:"12px", border:"none", borderRadius:10, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", fontFamily:"inherit" },
+      addMoreBtn: { flex:1, padding:"8px", background:"transparent", border:"1px dashed", borderRadius:8, fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"inherit", transition:"all 0.2s" },
+      input: { flex:1, padding:"10px 14px", background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.15)", borderRadius:10, color:"#fff", fontSize:16, outline:"none", fontFamily:"inherit" },
+      submitBtn: { padding:"10px 20px", background:"#ff6b35", border:"none", borderRadius:10, color:"#fff", fontSize:14, fontWeight:700, cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap" },
+      chipBtn: { padding:"8px 14px", borderRadius:10, border:"1px solid", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"inherit", transition:"all 0.2s", background:"none" },
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
