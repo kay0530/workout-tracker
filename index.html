@@ -483,7 +483,17 @@
       for (var i = 6; i >= 0; i--) {
         var d = new Date(); d.setDate(d.getDate() - i);
         var k = formatDate(d);
-        data.push({ date: d, completed: countCompletedGroups(state.records[k]) });
+        var dayRec = state.records[k] || {};
+        var groupDone = [];
+        for (var gi = 0; gi < EXERCISE_GROUPS.length; gi++) {
+          var g = EXERCISE_GROUPS[gi];
+          var done = false;
+          for (var mi = 0; mi < g.members.length; mi++) {
+            if (dayRec[g.members[mi]] != null) { done = true; break; }
+          }
+          groupDone.push(done);
+        }
+        data.push({ date: d, completed: countCompletedGroups(dayRec), groupDone: groupDone });
       }
       return data;
     }
@@ -774,7 +784,7 @@
             var col = el("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "4px" } });
             var dots = el("div", { style: { display: "flex", flexDirection: "column", gap: "3px" } });
             for (var dj = 0; dj < EXERCISE_GROUPS.length; dj++) {
-              dots.appendChild(el("div", { className: "week-dot", style: { backgroundColor: dj < wd.completed ? EXERCISE_GROUPS[dj].color : "#2a2a3a" } }));
+              dots.appendChild(el("div", { className: "week-dot", style: { backgroundColor: wd.groupDone[dj] ? EXERCISE_GROUPS[dj].color : "#2a2a3a" } }));
             }
             col.appendChild(dots);
             var dayIsToday = formatDate(wd.date) === formatDate(new Date());
